@@ -21,6 +21,13 @@ def pdf_to_excel(pdf_path, excel_path):
     txt_path = excel_path.replace(".xlsx", ".txt")
     txt_file = open(txt_path, "w", encoding="utf-8")
     
+    # Initialize a variable to store the header row
+    header_row = None
+    # Track if we've found a valid table with a header
+    found_header = False
+    # Initialize combined data container
+    combined_data = []
+    
     for page_num in range(len(doc)):
         page = doc[page_num]
         pix = page.get_pixmap(dpi=900)  # High DPI for better quality
@@ -140,43 +147,103 @@ def pdf_to_excel(pdf_path, excel_path):
             os.makedirs(csv_folder, exist_ok=True)
             csv_path = os.path.join(csv_folder, f"Page_{page_num+1}.csv")
 
-            # When processing each page, store table data for combined CSV
+            # When processing each page, store table data for combined output
             if table_data:
                 # Handle uneven row lengths
                 max_cols = max(len(row) for row in table_data)
                 padded_rows = [row + [''] * (max_cols - len(row)) for row in table_data]
                 
-                # Only add header row from first page with data
-                if page_num == 0 or not hasattr(pdf_to_excel, 'combined_data'):
-                    pdf_to_excel.combined_data = padded_rows
+                # Filter out rows containing "Seite: "
+                padded_rows = [row for row in padded_rows if not any("Seite: " in str(cell) for cell in row)]
+                
+                # Process rows with only one non-empty cell
+                # Process rows with only one non-empty cell and merge consecutive ones
+                i = 0
+                while i < len(padded_rows):
+                    row = padded_rows[i]
+                    non_empty_cells = [j for j, cell in enumerate(row) if cell and str(cell).strip()]
+                    
+                    # If there's only one non-empty cell
+                    if len(non_empty_cells) == 1:
+                        index = non_empty_cells[0]
+                        content = row[index]
+                        merged_content = content
+                        
+                        # Look ahead for consecutive rows with only one non-empty cell
+                        next_i = i + 1
+                        rows_to_remove = []
+                        
+                        while next_i < len(padded_rows):
+                            next_row = padded_rows[next_i]
+                            next_non_empty = [j for j, cell in enumerate(next_row) if cell and str(cell).strip()]
+                            
+                            # If next row also has only one non-empty cell
+                            if len(next_non_empty) == 1:
+                                # Append content with newline
+                                merged_content += '\n' + next_row[next_non_empty[0]]
+                                rows_to_remove.append(next_i)
+                                next_i += 1
+                            else:
+                                break
+                        
+                        # Create new row with merged content in second column (index 1)
+                        new_row = [''] * len(row)
+                        new_row[1] = merged_content
+                        padded_rows[i] = new_row
+                        
+                        # Remove the rows that were merged
+                        for idx in sorted(rows_to_remove, reverse=True):
+                            padded_rows.pop(idx)
+                    
+                    i += 1
+                    
+                
+                
+                # For the first page with data, use all rows including both header rows
+                if not found_header:
+                    combined_data = padded_rows
+                    # Save the first two rows as header
+                    header_row = padded_rows[:2] if len(padded_rows) >= 2 else padded_rows
+                    found_header = bool(header_row)
                 else:
-                    # Skip header row (first row) for subsequent pages
-                    pdf_to_excel.combined_data.extend(padded_rows[1:])
+                    # Skip the first two header rows for subsequent pages
+                    if padded_rows and len(padded_rows) > 2:
+                        combined_data.extend(padded_rows[2:])
+                    elif padded_rows and len(padded_rows) > 0:
+                        # If page has fewer than 2 rows, just add what's available
+                        combined_data.extend(padded_rows)
                 
-                # Write combined data to single CSV after last page
-                if page_num == len(doc) - 1:
-                    combined_csv_path = excel_path.replace(".xlsx", "_combined.csv")
-                    pd.DataFrame(pdf_to_excel.combined_data).to_csv(combined_csv_path, index=False, header=False)
-                    print(f"All tables saved to combined CSV: {combined_csv_path}")
+                # For the first page with data, use all rows including header
+                if not found_header:
+                    combined_data = padded_rows
+                    header_row = padded_rows[0] if padded_rows else None
+                    found_header = bool(header_row)
+                else:
+                    # Skip header row for subsequent pages
+                    if padded_rows and len(padded_rows) > 0:
+                        combined_data.extend(padded_rows[1:])
+                
+                # Save individual page to CSV (for reference)
+                pd.DataFrame(padded_rows).to_csv(csv_path, index=False, header=False)
             
-            # Create DataFrame and save to Excel
-            if table_data:
-                # Handle uneven row lengths
-                max_cols = max(len(row) for row in table_data)
-                padded_rows = [row + [''] * (max_cols - len(row)) for row in table_data]
-                
-                table_df = pd.DataFrame(padded_rows)
-                # Save to Excel sheet
-                sheet_name = f"Page_{page_num+1}"
-                table_df.to_excel(excel_writer, sheet_name=sheet_name, index=False, header=False)
-                print(f"Table extracted for page {page_num+1} with multi-line text blocks")
-            else:
-                print(f"No table data found on page {page_num+1}")
-                
         except Exception as e:
             print(f"Error processing page {page_num+1}: {str(e)}")
-            # Add empty sheet for failed page
-            pd.DataFrame().to_excel(excel_writer, sheet_name=f"Page_{page_num+1}", index=False)
+    
+    # After processing all pages, save the combined data
+    if combined_data:
+        # Save to a single Excel sheet
+        combined_df = pd.DataFrame(combined_data)
+        combined_df.to_excel(excel_writer, sheet_name="Combined_Table", index=False, header=False)
+        print(f"All tables saved to a single Excel sheet")
+        
+        # Also save to a single CSV
+        combined_csv_path = excel_path.replace(".xlsx", "_combined.csv")
+        combined_df.to_csv(combined_csv_path, index=False, header=False)
+        print(f"All tables saved to combined CSV: {combined_csv_path}")
+    else:
+        print("No table data found in the document")
+        # Add empty sheet
+        pd.DataFrame().to_excel(excel_writer, sheet_name="No_Data", index=False)
     
     # Save Excel file
     excel_writer.close()
